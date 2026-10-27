@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Suds Tycoon Unity Export</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Permanent+Marker&display=swap">
+<style>
+  body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: #12233d; color: #e8eef8; }
+  #stage { position: fixed; right: 0; bottom: 0; width: 64px; height: 64px; opacity: 0.01; }
+  main { padding: 16px; }
+  h1 { font: 24px 'Lilita One', sans-serif; margin: 0 0 8px; }
+  #log { white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  .ok { color: #8fe27a; } .err { color: #ff8080; }
+</style>
+</head>
+<body>
+<main><h1>Exporting Suds Tycoon art for Unity</h1><div id="log"></div></main>
+<div id="stage"></div><div id="labels"></div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.min.js"></script>
+<script src="js/util.js"></script>
+<script src="js/config.js"></script>
+<script src="js/icons.js"></script>
+<script src="js/gfx.js"></script>
+<script src="js/models.js"></script>
+<script src="js/stations.js"></script>
+<script type="module">
+import { GLTFExporter } from 'https://cdn.jsdelivr.net/npm/three@0.149.0/examples/jsm/exporters/GLTFExporter.js/+esm';
+
+const logEl = document.getElementById('log');
+const log = (s, cls = '') => { const d = document.createElement('div'); d.className = cls; d.textContent = s; logEl.appendChild(d); };
+const stats = { files: 0, bytes: 0, errors: [] };
+
+async function upload(dest, data, type = 'application/octet-stream') {
+  const res = await fetch('/__upload?dest=' + encodeURIComponent(dest), { method: 'POST', body: data, headers: { 'Content-Type': type } });
+  if (!res.ok) throw new Error(dest + ': ' + res.status);
+  stats.files++; stats.bytes += data.byteLength || data.size || data.length || 0;
+}
+
+// --- make three.js objects glTF/Unity friendly: standard materials, linear colours ---
+const convertedGeo = new WeakSet();
+function prep(root) {
+  root.updateMatrixWorld(true);
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    const g = o.geometry;
+    if (g.attributes.color && !convertedGeo.has(g)) {
+      const c = g.attributes.color, col = new THREE.Color();
+      const arr = new Float32Array(c.count * 3);
+      for (let i = 0; i < c.count; i++) { col.setRGB(c.getX(i), c.getY(i), c.getZ(i)).convertSRGBToLinear(); arr[i * 3] = col.r; arr[i * 3 + 1] = col.g; arr[i * 3 + 2] = col.b; }
+      g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+      convertedGeo.add(g);
+    }
+    const src = o.material;
+    if (Array.isArray(src)) return;
+    const base = { color: src.color ? src.color.clone().convertSRGBToLinear() : new THREE.Color(1, 1, 1), map: src.map || null, transparent: !!src.transparent, opacity: src.opacity != null ? src.opacity : 1, vertexColors: !!g.attributes.color, side: src.side };
+    let m;
+    if (src.isMeshBasicMaterial) m = new THREE.MeshBasicMaterial(base);
+    else {
+      m = new THREE.MeshStandardMaterial(Object.assign(base, { metalness: 0, roughness: 0.9 }));
+      if (src.emissive && (src.emissive.r || src.emissive.g || src.emissive.b)) m.emissive = src.emissive.clone().convertSRGBToLinear();
+    }
+    m.name = src.isMeshBasicMaterial ? 'Unlit' : (o.name === 'Paint' ? 'Paint' : (src.map ? 'Textured' : 'VertexColor'));
+    o.material = m;
+  });
+  return root;
+}
+const exporter = new GLTFExporter();
+async function glb(obj, dest) {
+  try {
+    prep(obj);
+    const buf = await exporter.parseAsync(obj, { binary: true, trs: true, onlyVisible: false });
+    await upload('Models/' + dest + '.glb', buf, 'model/gltf-binary');
+    log('model  ' + dest + '  ' + (buf.byteLength / 1024).toFixed(0) + ' KB', 'ok');
+  } catch (e) { stats.errors.push(dest + ': ' + e.message); log('FAILED ' + dest + ': ' + e.message, 'err'); }
+}
+const wrap = (name, ...objs) => { const g = new THREE.Group(); g.name = name; for (const o of objs) g.add(o); return g; };
+const fromBuilder = (name, fill) => { const b = new Builder(); fill(b); const m = b.build(); m.name = name; return wrap(name, m); };
+async function png(canvas, dest) {
+  const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+  await upload(dest, blob, 'image/png');
+}
+function canvasOf(tex) { return tex.image || (tex.userData && tex.userData.canvas); }
+
+async function run() {
+  await Promise.race([document.fonts.load('64px "Lilita One"'), new Promise(r => setTimeout(r, 3000))]);
+  await document.fonts.load('48px "Permanent Marker"').catch(() => {});
+  await ICONS.load();
+  GFX.init(document.getElementById('stage'));
+  log('three r' + THREE.REVISION + ' ready, exporting...');
+
+  // ---------------- cars (+ metadata for mud surfaces and wheels) ----------------
+  const meta = {};
+  for (const type of Object.keys(CFG.cars)) {
+    const c = Models.car(type, 0xffffff);
+    c.group.name = 'Car_' + type;
+    meta[type] = { len: c.len, w: c.w, h: c.h, surf: c.surf, wheels: c.wheels.map(wh => ({ x: wh.mesh.position.x, y: wh.mesh.position.y, z: wh.mesh.position.z, r: wh.r })) };
+    await glb(c.group, 'Cars/car_' + type);
+  }
+  await upload('Models/Cars/cars.json', new Blob([JSON.stringify(meta, null, 1)], { type: 'application/json' }), 'application/json');
+  log('meta   Cars/cars.json', 'ok');
+
+  // ---------------- people + hats ----------------
+  const looks = {
+    manager: { shirt: 0xffffff, vest: PAL.blue, star: true, badge: true },
+    stocker: { shirt: 0x4f8cff, vest: 0xff8a1f, skin: PAL.skin[1] },
+    cashier: { shirt: 0xffffff, vest: 0x46c23a, skin: PAL.skin[2] },
+    polisher: { shirt: 0xb44cff, vest: 0xffc93c, skin: PAL.skin[0] },
+    turbo: { shirt: 0xffd23f, vest: 0xff4d5a, cap: 0xffc92e, skin: PAL.skin[3] },
+    keeper: { shirt: 0xffffff, vest: PAL.blue, skin: PAL.skin[1] },
+  };
+  for (const [k, o] of Object.entries(looks)) { const p = Models.person(Object.assign({ pants: 0x2f4f9e }, o)); await glb(p.group, 'People/person_' + k); }
+  const hats = [['cap_star', 'cap', PAL.blue, true], ['cap', 'cap', PAL.blue, false], ['cap_gold', 'cap', 0xffc92e, false], ['cowboy', 'cowboy'], ['chef', 'chef'], ['crown', 'crown'], ['cone', 'cone'], ['duck', 'duck'], ['bubble', 'bubble']];
+  for (const [file, id, col, star] of hats) { const h = Models.hatMesh(id, col || PAL.blue, !!star); h.name = 'Hat'; await glb(wrap('Hat_' + file, h), 'People/hat_' + file); }
+
+  // ---------------- carried items, cash ----------------
+  for (const s of ['soap', 'wax', 'gel']) await glb(wrap('Item_' + s, Models.item(s)), 'Items/item_' + s);
+  { const m = new THREE.Mesh(Models.cashBundleGeo(), MAT.vc); m.name = 'Bundle'; await glb(wrap('CashBundle', m), 'Items/cash_bundle'); }
+  { const m = new THREE.Mesh(Models.coinGeometry(), MAT.vc); m.name = 'Coin'; await glb(wrap('Coin', m), 'Items/coin'); }
+
+  // ---------------- wash line ----------------
+  for (const t of ['brush', 'rinse', 'wax', 'dryer', 'tire', 'polish']) {
+    const m = Models.machine(t);
+    const fb = new Builder(); Models.stationFloor(fb, 0, 0); const floor = fb.build(); floor.name = 'Floor';
+    m.group.add(floor); m.group.name = 'Machine_' + t;
+    await glb(m.group, 'Machines/machine_' + t);
+  }
+  { const pb = Models.payBooth(); pb.group.name = 'PayBooth'; await glb(pb.group, 'Machines/pay_booth'); }
+  await glb(wrap('CashTable', Models.cashTable()), 'Machines/cash_table');
+  for (const s of ['soap', 'wax', 'gel']) { const h = Models.hopper(s); h.group.name = 'Hopper_' + s; await glb(h.group, 'Machines/hopper_' + s); }
+  for (const s of ['soap', 'wax', 'gel']) { const r = Models.rack(s); r.group.name = 'Rack_' + s; await glb(r.group, 'Machines/rack_' + s); }
+  for (const [n, label] of [['entrance', 'ENTRANCE'], ['exit', 'EXIT']]) { const g = Models.gate(label); g.group.name = 'Gate_' + n; await glb(g.group, 'Machines/gate_' + n); }
+
+  // ---------------- buildings + decorations ----------------
+  { const s = Models.shop(); s.group.name = 'Shop'; await glb(s.group, 'Buildings/shop'); }
+  await glb(wrap('StaffRoom', Models.staffRoom()), 'Buildings/staff_room');
+  await glb(wrap('Office', Models.office()), 'Buildings/office');
+  await glb(wrap('VipLounge', Models.vipLounge()), 'Buildings/vip_lounge');
+  await glb(wrap('CoffeeMachine', Models.coffeeMachine()), 'Buildings/coffee_machine');
+  await glb(wrap('Vending', Models.vending()), 'Buildings/vending');
+  { const t = Models.tubeMan(0xff4d5a); t.group.name = 'TubeMan'; await glb(t.group, 'Buildings/tube_man'); }
+  { const t = Models.tubeMan(0xff3df2); t.group.name = 'TubeManNeon'; await glb(t.group, 'Buildings/tube_man_neon'); }
+  { const f = Models.fountain(); f.group.name = 'Fountain'; await glb(f.group, 'Buildings/fountain'); }
+  await glb(wrap('Billboard', Models.billboard()), 'Buildings/billboard');
+  for (const l of [2.6, 3.0, 3.4]) await glb(wrap('FlowerBed', Models.flowerBed(l)), 'Buildings/flower_bed_' + String(l).replace('.', '_'));
+  await glb(wrap('WaitingArea', Models.waitingArea()), 'Buildings/waiting_area');
+  for (const k of ['goldcar', 'sandcastle', 'oasis', 'snowman', 'neontower', 'rocket']) await glb(wrap('Landmark_' + k, Models.landmark(k)), 'Buildings/landmark_' + k);
+  {
+    const g = new THREE.Group(); g.name = 'TravelSign';
+    const s = Models.signBoard('ROAD TRIP', 2.4, 0.7, '#ff8a1f', '#ffffff', 'road'); s.position.set(0, 2.3, -1.2); g.add(s);
+    const b = new Builder(); b.cyl(0.08, 0.08, 2.0, 6, 0x7d8796, { x: -0.8, y: 1.0, z: -1.25 }); b.cyl(0.08, 0.08, 2.0, 6, 0x7d8796, { x: 0.8, y: 1.0, z: -1.25 }); g.add(b.build());
+    await glb(g, 'Buildings/travel_sign');
+  }
+  { const s = Models.signBoard('LANE 2 SOON', 4.4, 1.0, '#ff8a1f', '#ffffff', 'lane'); await glb(wrap('Lane2Sign', s), 'Buildings/lane2_sign'); }
+
+  // ---------------- scenery props ----------------
+  for (let i = 0; i < PAL.leaf.length; i++) await glb(fromBuilder('Tree', b => Models.tree(b, 0, 0, 1, PAL.leaf[i])), 'Props/tree_' + i);
+  await glb(fromBuilder('Palm', b => Models.palm(b, 0, 0, 1)), 'Props/palm');
+  await glb(fromBuilder('Cactus', b => Models.cactus(b, 0, 0, 1)), 'Props/cactus');
+  await glb(fromBuilder('Pine', b => Models.pine(b, 0, 0, 1, true)), 'Props/pine_snow');
+  await glb(fromBuilder('Pine', b => Models.pine(b, 0, 0, 1, false)), 'Props/pine');
+  for (let i = 0; i < 3; i++) await glb(fromBuilder('Bush', b => Models.bush(b, 0, 0, 1, PAL.leaf[i])), 'Props/bush_' + i);
+  await glb(fromBuilder('Rock', b => Models.rock(b, 0, 0, 1)), 'Props/rock');
+  await glb(fromBuilder('RockRed', b => Models.rock(b, 0, 0, 1, 0xc0703f)), 'Props/rock_red');
+  await glb(fromBuilder('RockSnow', b => Models.rock(b, 0, 0, 1, 0xd9e2ee)), 'Props/rock_snow');
+  await glb(fromBuilder('RockMoon', b => Models.rock(b, 0, 0, 1, 0x7d8089)), 'Props/rock_moon');
+  await glb(fromBuilder('Lamp', b => Models.lamp(b, 0, 0, 0, false)), 'Props/lamp');
+  await glb(fromBuilder('Lamp', b => Models.lamp(b, 0, 0, 0, true)), 'Props/lamp_night');
+  await glb(fromBuilder('Cone', b => Models.trafficCone(b, 0, 0, 1)), 'Props/traffic_cone');
+  await glb(fromBuilder('TrashCan', b => Models.trashCan(b, 0, 0)), 'Props/trash_can');
+  await glb(fromBuilder('Bench', b => Models.bench(b, 0, 0, 0)), 'Props/bench');
+  await glb(fromBuilder('Snowman', b => Models.snowman(b, 0, 0, 1)), 'Props/snowman');
+  await glb(fromBuilder('Mesa', b => { b.cyl(2.2, 2.8, 3.2, 7, 0xc0703f, { y: 1.6, flat: true }); b.cyl(2.25, 2.25, 0.4, 7, 0xd08a55, { y: 3.25, flat: true }); }), 'Props/mesa');
+  await glb(fromBuilder('Crater', b => { b.torus(2.2, 0.56, 0x8a8d95, { y: 0.04, rx: -Math.PI / 2, sz: 0.5, rs: 6, ts: 14, flat: true }); b.add(GEO.circle(2.0, 14), 0x7d8089, { y: 0.02, rx: -Math.PI / 2 }); }), 'Props/crater');
+  await glb(fromBuilder('Umbrella', b => { b.cyl(0.05, 0.05, 2.4, 6, 0xffffff, { y: 1.2 }); b.cone(1.5, 0.6, 8, 0xff4d5a, { y: 2.45, flat: true }); b.box(1.0, 0.04, 1.8, 0x6fd3ff, { x: 0.9, y: 0.03, z: 0.6, ry: 0.3 }); }), 'Props/beach_umbrella');
+  await glb(fromBuilder('Surfboard', b => b.rbox(0.5, 2.2, 0.12, 0.2, 0xff8a1f, { y: 1.0, rz: 0.2 })), 'Props/surfboard');
+  await glb(fromBuilder('MoonDome', b => { b.sphere(1.6, 0xeef1f6, { ws: 14, hs: 8 }); b.box(0.8, 0.9, 0.5, 0xbfc5d0, { y: 0.45, z: 1.5 }); }), 'Props/moon_dome');
+  await glb(fromBuilder('Antenna', b => { b.cyl(0.06, 0.06, 2.6, 6, 0xd9dde4, { y: 1.3 }); b.cone(0.7, 0.35, 12, 0xeef1f6, { y: 2.7, rx: Math.PI * 0.8 }); }), 'Props/antenna');
+  for (let i = 0; i < 3; i++) await glb(fromBuilder('CityBlock', b => Models.tallBuilding(b, 0, 0, 7, 6, 12 + i * 7, [0x4a5168, 0x3d4459, 0x55607a][i], true)), 'Props/city_block_' + i);
+
+  // ---------------- textures ----------------
+  const texJobs = [['sparkle', TEX.sparkle()], ['glow', TEX.glow()], ['soft_shadow', TEX.soft()], ['ring', TEX.ring()], ['water_streaks', TEX.waterStreaks()], ['hazard', TEX.hazard()], ['grate', TEX.grate()]];
+  for (const [n, t] of texJobs) { await png(canvasOf(t), 'Textures/' + n + '.png'); log('tex    ' + n, 'ok'); }
+  // mat decals (pickup = blue, drop = green, operator / building = orange)
+  const mats = [];
+  for (const s of ['soap', 'wax', 'gel']) { mats.push([s, '#2563eb', 'pick_' + s], [s, '#46c23a', 'drop_' + s]); }
+  for (const i of ['pay', 'polish', 'bag', 'staff', 'office', 'map']) mats.push([i, '#ff8a1f', 'spot_' + i]);
+  for (const [icon, col, name] of mats) {
+    const m = MatDecal(icon, col); await png(canvasOf(m.material.map), 'Textures/mat_' + name + '.png');
+  }
+  log('tex    mat decals x' + mats.length, 'ok');
+  // pad frame without a price (Unity draws the price with TextMeshPro)
+  { const c = document.createElement('canvas'); c.width = c.height = 256; const ctx = c.getContext('2d');
+    TEX.rr(ctx, 10, 10, 236, 236, 34); ctx.fillStyle = 'rgba(20,40,80,0.42)'; ctx.fill();
+    ctx.lineWidth = 9; ctx.setLineDash([26, 16]); ctx.strokeStyle = '#ffffff'; TEX.rr(ctx, 14, 14, 228, 228, 30); ctx.stroke();
+    await png(c, 'Textures/pad_frame.png'); log('tex    pad_frame', 'ok'); }
+  // concrete lot texture per theme
+  const lots = { suburb: 0xc8ccd4, beach: 0xc9ccd2, desert: 0xd2c9bc, snow: 0xc4cad3, city: 0xb7bbc4, moon: 0xbfc3ca };
+  for (const [th, colr] of Object.entries(lots)) {
+    const c = document.createElement('canvas'); c.width = c.height = 512; const ctx = c.getContext('2d');
+    const base = new THREE.Color(colr);
+    ctx.fillStyle = '#' + base.getHexString(); ctx.fillRect(0, 0, 512, 512);
+    for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) { const cc = base.clone().offsetHSL(0, 0, U.rand(-0.025, 0.02)); ctx.fillStyle = '#' + cc.getHexString(); ctx.fillRect(i * 128 + 2, j * 128 + 2, 124, 124); }
+    ctx.fillStyle = 'rgba(0,0,0,0.035)'; for (let k = 0; k < 900; k++) ctx.fillRect(Math.random() * 512, Math.random() * 512, 2, 2);
+    ctx.fillStyle = 'rgba(40,45,55,0.16)'; for (let i = 0; i <= 4; i++) { ctx.fillRect(i * 128 - 2, 0, 4, 512); ctx.fillRect(0, i * 128 - 2, 512, 4); }
+    await png(c, 'Textures/lot_' + th + '.png');
+  }
+  log('tex    lot textures x6', 'ok');
+
+  // ---------------- UI icons (256 px PNG sprites) ----------------
+  for (const name of Object.keys(ICONS.imgs)) {
+    const c = document.createElement('canvas'); c.width = c.height = 256;
+    c.getContext('2d').drawImage(ICONS.imgs[name], 0, 0, 256, 256);
+    await png(c, 'Icons/' + name + '.png');
+  }
+  log('icons  x' + Object.keys(ICONS.imgs).length, 'ok');
+
+  window.__exportDone = { files: stats.files, mb: +(stats.bytes / 1048576).toFixed(2), errors: stats.errors };
+  log('DONE: ' + stats.files + ' files, ' + (stats.bytes / 1048576).toFixed(1) + ' MB, ' + stats.errors.length + ' errors', stats.errors.length ? 'err' : 'ok');
+}
+run().catch(e => { window.__exportDone = { fatal: String(e && e.stack || e) }; log('FATAL ' + e.stack, 'err'); });
+</script>
+</body>
+</html>

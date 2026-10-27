@@ -1,0 +1,8 @@
+Fonts used by Suds Tycoon (same as the web version, from Google Fonts):
+
+- Lilita One (LilitaOne-Regular.ttf), Copyright (c) 2011 Juan Montoreano.
+- Nunito (Nunito-ExtraBold.ttf, Nunito-Black.ttf), Copyright 2014 The Nunito Project Authors
+  (https://github.com/googlefonts/nunito).
+
+Both are licensed under the SIL Open Font License, Version 1.1 (https://openfontlicense.org).
+They may be bundled and shipped with the game; they may not be sold on their own.
